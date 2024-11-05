@@ -1,0 +1,191 @@
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from google.colab import drive
+
+# Mount Google Drive
+drive.mount('/content/drive')
+
+
+# Data Augmentation
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=15,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# Rescale validation and test data
+test_val_datagen = ImageDataGenerator(rescale=1./255)
+
+# Dataset path
+dataset_path = '/content/drive/MyDrive/modulation_dataset_10dB'
+
+# Data generators
+train_generator = train_datagen.flow_from_directory(
+    directory=f'{dataset_path}/train',
+    target_size=(224, 224),
+    batch_size=10,
+    class_mode='categorical'
+)
+
+val_generator = test_val_datagen.flow_from_directory(
+    directory=f'{dataset_path}/validation',
+    target_size=(224, 224),
+    batch_size=10,
+    class_mode='categorical'
+)
+
+test_generator = test_val_datagen.flow_from_directory(
+    directory=f'{dataset_path}/test',
+    target_size=(224, 224),
+    batch_size=10,
+    class_mode='categorical',
+    shuffle=False
+)
+
+# Model checkpoint and early stopping
+checkpoint = ModelCheckpoint('best_model.keras', monitor='val_accuracy', save_best_only=True, mode='max')
+early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-5)
+
+# Build AlexNet model
+model = Sequential([
+    Conv2D(96, (11, 11), strides=(4, 4), activation='relu', input_shape=(224, 224, 3)),
+    MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+    Conv2D(256, (5, 5), padding='same', activation='relu'),
+    MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+    Conv2D(384, (3, 3), padding='same', activation='relu'),
+    Conv2D(384, (3, 3), padding='same', activation='relu'),
+    Conv2D(256, (3, 3), padding='same', activation='relu'),
+    MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+    Flatten(),
+    Dense(4096, activation='relu'),
+    Dropout(0.5),
+    Dense(4096, activation='relu'),
+    Dropout(0.5),
+    Dense(train_generator.num_classes, activation='softmax')
+])
+
+# Compile model
+model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=0.001, momentum=0.9),
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# Train the model
+history = model.fit(
+    train_generator,
+    epochs=12,
+    validation_data=val_generator,
+    callbacks=[checkpoint, early_stop, reduce_lr]
+)
+
+# Load the best model
+model.load_weights('best_model.keras')
+
+# Evaluate the model on the test set
+test_loss, test_accuracy = model.evaluate(test_generator)
+print(f'Test Accuracy: {test_accuracy * 100:.2f}%')
+
+# Predict probabilities for test data
+Y_pred = model.predict(test_generator)
+y_pred = np.argmax(Y_pred, axis=1)
+
+# Confusion matrix
+cm = confusion_matrix(test_generator.classes, y_pred)
+target_names = list(train_generator.class_indices.keys())
+
+# Plot confusion matrix
+def plot_confusion_matrix(cm, classes, title='Confusion Matrix', cmap=plt.cm.Blues):
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap=cmap, xticklabels=classes, yticklabels=classes)
+    plt.title(title)
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
+
+# Plot ROC curves for each class
+def plot_roc_curves(test_generator, y_pred, num_classes):
+    fpr = {}
+    tpr = {}
+    roc_auc = {}
+    for i in range(num_classes):
+        fpr[i], tpr[i], _ = roc_curve(test_generator.classes == i, Y_pred[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+    plt.figure(figsize=(10, 8))
+    for i in range(num_classes):
+        plt.plot(fpr[i], tpr[i], label=f'Class {target_names[i]} (AUC = {roc_auc[i]:.2f})')
+
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC) Curves')
+    plt.legend(loc='lower right')
+    plt.show()
+
+# Plot confusion matrix
+plot_confusion_matrix(cm, target_names, title='Confusion Matrix')
+
+# Classification report
+print('Classification Report')
+print(classification_report(test_generator.classes, y_pred, target_names=target_names))
+
+# Plot ROC-AUC curves
+plot_roc_curves(test_generator, Y_pred, num_classes=len(target_names))
+
+# Plot accuracy and loss curves
+plt.figure(figsize=(12, 6))
+
+# Plot accuracy
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training and Validation Accuracy')
+
+# Plot loss
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend(loc='upper right')
+plt.title('Training and Validation Loss')
+
+plt.tight_layout()
+plt.show()
+
+
+# Accuracy for each modulation type
+class_accuracies = {}
+for i, class_name in enumerate(target_names):
+    class_indices = np.where(test_generator.classes == i)[0]
+    class_correct = np.sum(y_pred[class_indices] == i)
+    class_accuracy = class_correct / len(class_indices)
+    class_accuracies[class_name] = class_accuracy
+    print(f'Accuracy for {class_name}: {class_accuracy * 100:.2f}%')
+
+# Confusion matrices for each modulation type
+for i, class_name in enumerate(target_names):
+    cm_per_class = confusion_matrix(test_generator.classes == i, y_pred == i)
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm_per_class, annot=True, cmap=plt.cm.Blues, fmt='d', xticklabels=['Non-' + class_name, class_name], yticklabels=['Non-' + class_name, class_name])
+    plt.title(f'Confusion Matrix for {class_name}')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
